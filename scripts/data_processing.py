@@ -11,7 +11,7 @@ import re
 # Database connection parameters
 DB_PARAMS = {
     "host": "localhost",
-    "database": "child_face_db",
+    "database": "child_images_fn",
     "user": "postgres",
     "password": "tranphuong"  # Thay bằng mật khẩu của bạn
 }
@@ -29,7 +29,7 @@ def parse_filename(filename):
         return None, None, None
 
 
-def process_images(raw_dir, processed_dir, max_age=12, target_size=(128, 128)):
+def process_images(raw_dir, processed_dir, max_age=10, target_size=(200, 200)):
     """
     Process UTKFace images:
     1. Select only children images (age <= max_age)
@@ -47,7 +47,6 @@ def process_images(raw_dir, processed_dir, max_age=12, target_size=(128, 128)):
     metadata = []
 
     # Process each image
-    count = 0
     for filename in os.listdir(raw_dir):
         if not (filename.endswith('.jpg') or filename.endswith('.png') or filename.endswith('.jpeg')):
             continue
@@ -79,10 +78,10 @@ def process_images(raw_dir, processed_dir, max_age=12, target_size=(128, 128)):
         try:
             cursor.execute(
                 """
-                INSERT INTO images (file_name, age, gender, ethnicity, path)
-                VALUES (%s, %s, %s, %s, %s) RETURNING id
+                INSERT INTO face_images (image_path, age, gender, race)
+                VALUES (%s, %s, %s, %s) RETURNING id
                 """,
-                (filename, age, gender_label, race, processed_path)
+                (filename, age, gender, race)
             )
 
             image_id = cursor.fetchone()[0]
@@ -91,17 +90,10 @@ def process_images(raw_dir, processed_dir, max_age=12, target_size=(128, 128)):
                 'file_name': filename,
                 'age': age,
                 'gender': gender_label,
-                'ethnicity': race,
+                'race': race,
                 'path': processed_path
             })
 
-            count += 1
-            if count % 50 == 0:
-                print(f"Processed {count} children face images")
-
-            # Lấy 150 ảnh như yêu cầu
-            if count >= 150:
-                break
 
         except psycopg2.errors.UniqueViolation:
             # Skip duplicate files

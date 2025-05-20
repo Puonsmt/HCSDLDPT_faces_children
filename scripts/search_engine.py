@@ -8,70 +8,92 @@ import psycopg2
 import io
 from psycopg2 import Binary
 import pandas as pd
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from data_processing import parse_filename
 
 # Từ feature_extraction.py
 from feature_extraction import (
-    extract_mediapipe_face_landmarks,
-    extract_mediapipe_face_detection,
-    extract_facial_attributes,
+    extract_color_histogram,
+    extract_landmark_features,
     extract_hog_features
 )
 
 # Database connection parameters
 DB_PARAMS = {
     "host": "localhost",
-    "database": "child_face_db",
+    "database": "child_images_fn",
     "user": "postgres",
     "password": "tranphuong"  # Thay bằng mật khẩu của bạn
 }
 
+epsilon = 1e-10  # để tránh chia cho 0
 
-def load_feature_vectors(feature_type='mediapipe_landmarks'):
-    """Load all feature vectors from database."""
+
+def minmax_normalize(similarities):
+    min_val = np.min(similarities)
+    max_val = np.max(similarities)
+    return (similarities - min_val) / (max_val - min_val + epsilon)
+
+
+def load_feature_vectors():
     try:
         conn = psycopg2.connect(**DB_PARAMS)
         cursor = conn.cursor()
 
-        # Query to get image IDs and feature vectors
-        cursor.execute(
-            """
-            SELECT i.id, i.file_name, i.path, f.feature_vector
-            FROM images i
-                     JOIN features f ON i.id = f.image_id
-            WHERE f.feature_type = %s
-            """,
-            (feature_type,)
-        )
+        cursor.execute("""
+                       SELECT f.image_id, i.image_path, f.hog, f.color_hist, f.landmark
+                       FROM image_features_1 f
+                                JOIN face_images i ON f.image_id = i.id
+                       """)
 
         results = cursor.fetchall()
 
-        feature_vectors = []
-        image_ids = []
-        file_names = []
-        image_paths = []
-
-        for image_id, file_name, path, feature_vector_bytes in results:
-            # Convert binary data back to numpy array
-            vector_bytes = io.BytesIO(feature_vector_bytes)
-            feature_vector = np.load(vector_bytes, allow_pickle=True)
-
-            feature_vectors.append(feature_vector)
-            image_ids.append(image_id)
-            file_names.append(file_name)
-            image_paths.append(path)
-
-        cursor.close()
-        conn.close()
-
-        return {
-            'feature_vectors': np.array(feature_vectors),
-            'image_ids': np.array(image_ids),
-            'file_names': np.array(file_names),
-            'image_paths': np.array(image_paths)
+        # Khởi tạo dictionary để lưu trữ kết quả
+        data = {
+            'image_ids': [],
+            'file_paths': [],
+            'full_paths': [],
+            'feature_vectors': {
+                'hog': [],
+                'color_hist': [],
+                'landmark': []
+            }
         }
 
+        # Xử lý kết quả
+        for row in results:
+            image_id = row[0]
+            file_path = row[1]
+            full_path = os.path.join('../data/processed_images', file_path)
+            hog_vector = np.array(row[2])
+            color_hist_vector = np.array(row[3])
+            landmark_vector = np.array(row[4])
+
+            # Thêm image_id và paths
+            data['image_ids'].append(image_id)
+            data['file_paths'].append(file_path)
+            data['full_paths'].append(full_path)
+
+            # Thêm các vector đặc trưng
+            data['feature_vectors']['hog'].append(hog_vector)
+            data['feature_vectors']['color_hist'].append(color_hist_vector)
+            data['feature_vectors']['landmark'].append(landmark_vector)
+
+        # Chuyển đổi list thành numpy array
+        data['image_ids'] = np.array(data['image_ids'])
+        data['file_paths'] = np.array(data['file_paths'])
+        data['full_paths'] = np.array(data['full_paths'])
+        data['feature_vectors']['hog'] = np.array(data['feature_vectors']['hog'])
+        data['feature_vectors']['color_hist'] = np.array(data['feature_vectors']['color_hist'])
+        data['feature_vectors']['landmark'] = np.array(data['feature_vectors']['landmark'])
+
+        return data
+
     except Exception as e:
-        print(f"Error loading feature vectors: {e}")
+        print(f"Lỗi khi tải vector đặc trưng: {e}")
         return None
 
 
@@ -102,191 +124,104 @@ def compute_similarity(query_vector, all_vectors, metric='cosine'):
     return similarities
 
 
-def extract_query_features(query_image_path, feature_type='mediapipe_landmarks'):
+def extract_query_features(query_image_path, feature_type='hog'):
     """Extract features from query image based on feature type."""
-    if feature_type == 'mediapipe_landmarks':
-        return extract_mediapipe_face_landmarks(query_image_path)
-    elif feature_type == 'mediapipe_detection':
-        return extract_mediapipe_face_detection(query_image_path)
-    elif feature_type == 'facial_attributes':
-        return extract_facial_attributes(query_image_path)
-    elif feature_type == 'hog':
+
+    if feature_type == 'hog':
         return extract_hog_features(query_image_path)
+    elif feature_type == 'color_hist':
+        return extract_color_histogram(query_image_path)
+    elif feature_type == 'landmark':
+        return extract_landmark_features(query_image_path)
     else:
         raise ValueError(f"Unsupported feature type: {feature_type}")
 
 
-def find_similar_images(query_image_path, top_k=3, feature_type='mediapipe_landmarks', metric='cosine'):
+def get_image_similarity(query_image_path, metric='cosine'):
     """Find the top_k most similar images to the query image."""
     try:
-        # Extract features from query image
-        query_vector = extract_query_features(query_image_path, feature_type)
+        weights = {
+            'hog': 0.3,
+            'color_hist': 0.2,
+            'landmark': 0.5
+        }
 
-        if query_vector is None:
-            print(f"Could not extract {feature_type} features from query image: {query_image_path}")
-            return None
-
-        # Load all feature vectors
-        data = load_feature_vectors(feature_type)
-
-        if data is None or len(data['feature_vectors']) == 0:
-            print(f"Could not load {feature_type} feature vectors from database")
-            return None
+        # Tải toàn bộ đặc trưng đã có trong database về
+        data = load_feature_vectors()
 
         # Compute similarities
-        similarities = compute_similarity(query_vector, data['feature_vectors'], metric)
+        query_vector_hog = extract_query_features(query_image_path, 'hog')
+        similarities_hog_1 = compute_similarity(query_vector_hog, data['feature_vectors']['hog'], metric)
+        similarities_hog = minmax_normalize(similarities_hog_1)
 
-        # Get indices of top_k most similar images
-        if metric == 'cosine':
-            # For cosine similarity, higher values are better
-            top_indices = np.argsort(similarities)[::-1][:top_k]
-        else:
-            # For distance-based metrics, lower values are better
-            top_indices = np.argsort(similarities)[:top_k]
+        query_vector_color_hist = extract_query_features(query_image_path, 'color_hist')
+        similarities_color_hist_1 = compute_similarity(query_vector_color_hist, data['feature_vectors']['color_hist'],
+                                                       metric)
+        similarities_color_hist = minmax_normalize(similarities_color_hist_1)
+
+        query_vector_landmark = extract_query_features(query_image_path, 'landmark')
+        similarities_landmark_1 = compute_similarity(query_vector_landmark, data['feature_vectors']['landmark'], metric)
+        similarities_landmark = minmax_normalize(similarities_landmark_1)
+
+        similarities = (
+                weights['hog'] * similarities_hog +
+                weights['color_hist'] * similarities_color_hist +
+                weights['landmark'] * similarities_landmark
+        )
 
         # Return top matches
-        return [
-            {
-                'image_id': data['image_ids'][i],
-                'file_name': data['file_names'][i],
-                'path': data['image_paths'][i],
-                'similarity': float(similarities[i])
+        results = []
+        for i, (image_id, file_path, full_path, sim) in enumerate(zip(
+                data['image_ids'], data['file_paths'], data['full_paths'], similarities)):
+            # Lưu chi tiết độ tương đồng của từng đặc trưng
+            similarity_details = {
+                'hog': float(similarities_hog[i] * 100),
+                'color_hist': float(similarities_color_hist[i] * 100),
+                'landmark': float(similarities_landmark[i] * 100)
             }
-            for i in top_indices
-        ]
+
+            results.append({
+                'image_id': image_id,
+                'file_path': file_path,
+                'full_path': full_path,
+                'similarity': float(sim),
+                'similarity_details': similarity_details
+            })
+
+        if metric == 'cosine':
+            results = sorted(results, key=lambda x: x['similarity'], reverse=True)[:3]
+        else:
+            # Sắp xếp theo similarity tăng dần và lấy top 3
+            results = sorted(results, key=lambda x: x['similarity'])[:3]
+
+        final_results = []
+        for r in results:
+            # Trích xuất tên file từ đường dẫn
+            filename = os.path.basename(r['file_path'])
+
+            # Sử dụng hàm parse_filename đã import
+            age, gender, race = parse_filename(filename)
+
+            # Chuyển đổi gender từ số sang text
+            if gender is not None:
+                gender = 'Nữ' if gender == 1 else 'Nam'
+
+            # Tạo dictionary kết quả
+            final_results.append({
+                'image_id': r['image_id'],
+                'file_name': r['file_path'],
+                'filename': filename,
+                'path': f'/static/images/{filename}',
+                'similarity': r['similarity'],
+                'similarity_details': r['similarity_details'],
+                'age': age,
+                'gender': gender,
+            })
+
+        return final_results
 
     except Exception as e:
         print(f"Error finding similar images: {e}")
-        return None
-
-
-def ensemble_search(query_image_path, top_k=3, weights=None):
-    """
-    Combine results from multiple feature types for better search quality.
-
-    Parameters:
-    - weights: Dictionary with feature types as keys and their weights as values
-              If None, all feature types are weighted equally
-    """
-    # Default weights if not provided
-    if weights is None:
-        weights = {
-            'mediapipe_landmarks': 0.4,
-            'mediapipe_detection': 0.2,
-            'facial_attributes': 0.2,
-            'hog': 0.2
-        }
-
-    # Get results from different feature types
-    results_by_type = {}
-    all_image_ids = set()
-
-    for feature_type, weight in weights.items():
-        results = find_similar_images(
-            query_image_path,
-            top_k=top_k * 2,  # Get more results and then combine
-            feature_type=feature_type
-        )
-
-        if results:
-            results_by_type[feature_type] = results
-            all_image_ids.update(r['image_id'] for r in results)
-
-    if not results_by_type:
-        print("No results found for any feature type")
-        return None
-
-        # Combine results
-    all_results = {}
-
-    for image_id in all_image_ids:
-        all_results[image_id] = {
-            'image_id': image_id,
-            'weighted_scores': []
-        }
-
-    # Process each feature type's results
-    for feature_type, results in results_by_type.items():
-        # Get weight for this feature
-        weight = weights.get(feature_type, 1.0 / len(results_by_type))
-
-        # Find max similarity for normalization
-        max_sim = max(r['similarity'] for r in results)
-        max_sim = max(max_sim, 1e-10)  # Avoid division by zero
-
-        # Add weighted normalized scores
-        for r in results:
-            image_id = r['image_id']
-            if image_id in all_results:
-                normalized_score = r['similarity'] / max_sim
-                all_results[image_id]['weighted_scores'].append(normalized_score * weight)
-
-                # Copy metadata from the first encounter
-                if 'file_name' not in all_results[image_id]:
-                    all_results[image_id]['file_name'] = r['file_name']
-                    all_results[image_id]['path'] = r['path']
-
-    # Calculate final scores
-    for image_id, data in all_results.items():
-        if data['weighted_scores']:
-            data['final_score'] = sum(data['weighted_scores'])
-        else:
-            data['final_score'] = 0
-
-    # Sort by final score
-    sorted_results = sorted(
-        [r for r in all_results.values() if 'file_name' in r],
-        key=lambda x: x['final_score'],
-        reverse=True
-    )
-
-    # Return top_k results
-    top_results = sorted_results[:top_k]
-    # Trước khi trả về kết quả, chuyển đổi đường dẫn
-    final_results = []
-    for r in top_results:
-        # Trích xuất tên file từ đường dẫn
-        filename = os.path.basename(r['file_name'])
-
-        # Tạo dictionary kết quả với đường dẫn mới
-        final_results.append({
-            'image_id': r['image_id'],
-            'file_name': r['file_name'],
-            'filename': filename,  # Thêm tên file ngắn
-            'path': f'/static/images/{filename}',  # Đường dẫn cho Flask
-            'similarity': r['final_score']
-        })
-
-    return final_results
-
-
-def get_feature_stats():
-    """Get statistics about stored features."""
-    try:
-        conn = psycopg2.connect(**DB_PARAMS)
-        cursor = conn.cursor()
-
-        # Query to count features by type
-        cursor.execute(
-            """
-            SELECT feature_type, COUNT(*)
-            FROM features
-            GROUP BY feature_type
-            """
-        )
-
-        results = cursor.fetchall()
-
-        cursor.close()
-        conn.close()
-
-        return {
-            feature_type: count
-            for feature_type, count in results
-        }
-
-    except Exception as e:
-        print(f"Error getting feature stats: {e}")
         return None
 
 
@@ -294,22 +229,9 @@ if __name__ == "__main__":
     # Example usage
     query_image = "../data/test_image.jpg"  # Path to test image
 
-    # Print feature statistics
-    stats = get_feature_stats()
-    if stats:
-        print("Feature statistics:")
-        for feature_type, count in stats.items():
-            print(f"  {feature_type}: {count}")
+    metric = 'cosine'
 
-    # Custom weights for ensemble search
-    weights = {
-        'mediapipe_landmarks': 0.5,
-        'mediapipe_detection': 0.2,
-        'facial_attributes': 0.2,
-        'hog': 0.1
-    }
-
-    results = ensemble_search(query_image, weights=weights)
+    results = get_image_similarity(query_image, metric)
 
     if results:
         print("\nTop similar images:")

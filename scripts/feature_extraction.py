@@ -8,313 +8,181 @@ import psycopg2
 import io
 from psycopg2 import Binary
 import pandas as pd
+from skimage.feature import hog
+from PIL import Image, ImageOps
+
 
 # Database connection parameters
 DB_PARAMS = {
     "host": "localhost",
-    "database": "child_face_db",
+    "database": "child_images_fn",
     "user": "postgres",
     "password": "tranphuong"  # Thay bằng mật khẩu của bạn
 }
 
-# Khởi tạo MediaPipe Face Mesh
 mp_face_mesh = mp.solutions.face_mesh
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True)
 
-# Khởi tạo MediaPipe Face Detection
-mp_face_detection = mp.solutions.face_detection
-
-
-def extract_mediapipe_face_landmarks(image_path):
-    """Extract facial landmarks using MediaPipe Face Mesh."""
-    try:
-        # Load image
-        image = cv2.imread(image_path)
-        if image is None:
-            print(f"Could not read image: {image_path}")
-            return None
-
-        # Convert to RGB for MediaPipe
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        # Process with MediaPipe Face Mesh
-        with mp_face_mesh.FaceMesh(
-                static_image_mode=True,
-                max_num_faces=1,  # Assuming one face per image
-                refine_landmarks=True,
-                min_detection_confidence=0.5) as face_mesh:
-
-            results = face_mesh.process(image_rgb)
-
-            if not results.multi_face_landmarks:
-                print(f"No face detected in {image_path}")
-                return None
-
-            # Get first face landmarks
-            face_landmarks = results.multi_face_landmarks[0]
-
-            # Convert landmarks to a numpy array
-            landmarks_array = []
-            for landmark in face_landmarks.landmark:
-                landmarks_array.extend([landmark.x, landmark.y, landmark.z])
-
-            return np.array(landmarks_array, dtype=np.float32)
-
-    except Exception as e:
-        print(f"Error extracting landmarks from {image_path}: {e}")
-        return None
-
-
-def extract_mediapipe_face_detection(image_path):
-    """Extract face detection features using MediaPipe Face Detection."""
-    try:
-        # Load image
-        image = cv2.imread(image_path)
-        if image is None:
-            print(f"Could not read image: {image_path}")
-            return None
-
-        # Convert to RGB for MediaPipe
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        # Process with MediaPipe Face Detection
-        with mp_face_detection.FaceDetection(
-                model_selection=1,  # 0 for closer faces, 1 for farther faces
-                min_detection_confidence=0.5) as face_detection:
-
-            results = face_detection.process(image_rgb)
-
-            if not results.detections:
-                print(f"No face detected in {image_path}")
-                return None
-
-            # Get first face detection
-            detection = results.detections[0]
-
-            # Extract face bounding box and keypoints
-            bbox = detection.location_data.relative_bounding_box
-            keypoints = []
-
-            # Add normalized bounding box coordinates
-            bbox_array = [bbox.xmin, bbox.ymin, bbox.width, bbox.height]
-
-            # Add six face keypoints (right eye, left eye, nose tip, mouth center, right ear tragion, left ear tragion)
-            for i in range(6):
-                kp = detection.location_data.relative_keypoints[i]
-                keypoints.extend([kp.x, kp.y])
-
-            # Combine bbox and keypoints into a single feature vector
-            features = np.array(bbox_array + keypoints, dtype=np.float32)
-            return features
-
-    except Exception as e:
-        print(f"Error extracting face detection from {image_path}: {e}")
-        return None
-
-
-def extract_facial_attributes(image_path):
+def extract_hog_features(image_path, resize_dim=(200, 200)):
     """
-    Extract facial attributes like skin color, face shape, etc.
-    This is a simplified version and can be expanded for more sophisticated analysis.
+    Trích xuất đặc trưng HOG từ ảnh PIL.
+
+    Args:
+        image (PIL.Image): Ảnh đầu vào.
+        resize_dim (tuple): Kích thước ảnh sau khi resize.
+
+    Returns:
+        np.array: Vector đặc trưng HOG.
     """
-    try:
-        # Load image
+    if isinstance(image_path, str):
         image = cv2.imread(image_path)
         if image is None:
-            print(f"Could not read image: {image_path}")
-            return None
+            raise ValueError(f"Không thể đọc ảnh từ đường dẫn: {image_path}")
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    else:
+        image = image_path  # nếu đã là ảnh dạng np.array rồi
 
-        # Convert to RGB for better color analysis
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    # Chuyển từ PIL Image sang numpy array
+    # image_np = np.array(image)
 
-        # Get face area using MediaPipe Face Detection
-        with mp_face_detection.FaceDetection(
-                min_detection_confidence=0.5) as face_detection:
+    # Nếu ảnh là RGB, chuyển sang grayscale
+    if len(image.shape) == 3 and image.shape[2] == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    elif len(image.shape) == 2:
+        gray = image
+    else:
+        return None  # Không hợp lệ
 
-            results = face_detection.process(image_rgb)
+    # Resize ảnh
+    gray_resized = cv2.resize(gray, resize_dim)
 
-            if not results.detections:
-                print(f"No face detected in {image_path}")
-                return None
+    # Trích xuất HOG
+    features = hog(
+        gray_resized,
+        orientations=9,
+        pixels_per_cell=(8, 8),
+        cells_per_block=(2, 2),
+        block_norm='L2-Hys',
+        feature_vector=True
+    )
 
-            # Get face bounding box
-            detection = results.detections[0]
-            bbox = detection.location_data.relative_bounding_box
+    return np.array(features)
 
-            h, w, _ = image.shape
-            x = int(bbox.xmin * w)
-            y = int(bbox.ymin * h)
-            width = int(bbox.width * w)
-            height = int(bbox.height * h)
+def extract_color_histogram(image_path, bins=(8, 8, 8)):
+    """
+    Trích xuất đặc trưng histogram màu từ ảnh.
 
-            # Ensure valid coordinates
-            x = max(0, x)
-            y = max(0, y)
-            width = min(width, w - x)
-            height = min(height, h - y)
+    Args:
+        image (PIL.Image hoặc numpy.ndarray)
+        bins (tuple): Số lượng bin cho mỗi kênh màu (H, S, V)
 
-            # Extract face region
-            face_region = image_rgb[y:y + height, x:x + width]
-
-            if face_region.size == 0:
-                print(f"Invalid face region in {image_path}")
-                return None
-
-            # Compute average skin color (simplified)
-            average_color = np.mean(face_region, axis=(0, 1))
-
-            # Compute face shape features (simplified - aspect ratio of face)
-            face_aspect_ratio = height / width if width > 0 else 0
-
-            # Combine into feature vector
-            features = np.array([
-                average_color[0], average_color[1], average_color[2],
-                face_aspect_ratio,
-                width * height  # Face area in pixels
-            ], dtype=np.float32)
-
-            return features
-
-    except Exception as e:
-        print(f"Error extracting facial attributes from {image_path}: {e}")
-        return None
-
-
-def extract_hog_features(image_path, cell_size=(8, 8), block_size=(2, 2), nbins=9):
-    """Extract HOG (Histogram of Oriented Gradients) features."""
-    try:
-        # Load image and convert to grayscale
+    Returns:
+        np.array: Vector histogram màu chuẩn hóa
+    """
+    if isinstance(image_path, str):
         image = cv2.imread(image_path)
         if image is None:
-            print(f"Could not read image: {image_path}")
-            return None
+            raise ValueError(f"Không thể đọc ảnh từ đường dẫn: {image_path}")
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    else:
+        image = image_path  # nếu đã là ảnh dạng np.array rồi
 
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+    hist = cv2.calcHist([hsv], [0, 1, 2], None, bins,
+                        [0, 180, 0, 256, 0, 256])
+    cv2.normalize(hist, hist)
+    return hist.flatten()
 
-        # Calculate HOG features
-        win_size = gray.shape
-        block_stride = (cell_size[0] // 2, cell_size[1] // 2)
+def extract_landmark_features(image_path, max_points=468):
+    """
+    Trích xuất đặc trưng landmark từ ảnh đầu vào.
 
-        hog = cv2.HOGDescriptor(
-            win_size,
-            block_size,
-            block_stride,
-            cell_size,
-            nbins
-        )
+    Args:
+        image (PIL.Image hoặc numpy.ndarray)
+    Returns:
+        np.array: Vector các tọa độ landmark (flattened)
+    """
+    if isinstance(image_path, str):
+        image = cv2.imread(image_path)
+        if image is None:
+            raise ValueError(f"Không thể đọc ảnh từ đường dẫn: {image_path}")
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    else:
+        image = image_path  # nếu đã là ảnh dạng np.array rồi
 
-        hog_features = hog.compute(gray)
-        return hog_features.flatten()
+    results = face_mesh.process(image)
 
-    except Exception as e:
-        print(f"Error extracting HOG features from {image_path}: {e}")
-        return None
+    h, w, _ = image.shape
+    if results.multi_face_landmarks:
+        landmarks = results.multi_face_landmarks[0]
+        coords = []
+        for i in range(max_points):
+            pt = landmarks.landmark[i]
+            coords.extend([pt.x * w, pt.y * h])  # flatten (x1, y1, x2, y2, ...)
+        return np.array(coords)
+    return np.zeros(max_points * 2)
 
-
-def store_features_in_db(image_id, feature_type, feature_vector):
-    """Store feature vector in the database."""
+def store_features_in_db(image_id, hog, color_hist, landmark):
+    """
+    Lưu hoặc cập nhật các đặc trưng vào bảng image_features.
+    """
     try:
         conn = psycopg2.connect(**DB_PARAMS)
         cursor = conn.cursor()
 
-        # Convert numpy array to binary data
-        vector_bytes = io.BytesIO()
-        np.save(vector_bytes, feature_vector)
-        vector_bytes.seek(0)
+        # Chuyển các vector numpy sang list Python để psycopg2 tự chuyển sang ARRAY
+        hog_list = hog.tolist() if hog is not None else None
+        color_hist_list = color_hist.tolist() if color_hist is not None else None
+        landmark_list = landmark.tolist() if landmark is not None else None
 
-        # Check if features already exist for this image and feature type
         cursor.execute(
-            """
-            SELECT id
-            FROM features
-            WHERE image_id = %s AND feature_type = %s
-            """,
-            (image_id, feature_type)
+                """
+                INSERT INTO image_features_1 (image_id, hog, color_hist, landmark)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (image_id, hog_list, color_hist_list, landmark_list)
         )
-
-        exists = cursor.fetchone()
-
-        if exists:
-            # Update existing features
-            cursor.execute(
-                """
-                UPDATE features
-                SET feature_vector = %s
-                WHERE image_id = %s AND feature_type = %s
-                """,
-                (Binary(vector_bytes.read()), image_id, feature_type)
-            )
-        else:
-            # Insert new features
-            cursor.execute(
-                """
-                INSERT INTO features (image_id, feature_type, feature_vector)
-                VALUES (%s, %s, %s)
-                """,
-                (image_id, feature_type, Binary(vector_bytes.read()))
-            )
-
         conn.commit()
         cursor.close()
         conn.close()
-
         return True
-
     except Exception as e:
         print(f"Error storing features in database: {e}")
         return False
 
+def extract_and_store_features(metadata_path):
+    """
+    Trích xuất và lưu embedding, landmarks, color_histogram cho từng ảnh vào bảng image_features.
+    """
 
-def extract_and_store_features(processed_dir, metadata_path):
-    """Extract features for all processed images and store in database."""
     # Load metadata
     metadata = pd.read_csv(metadata_path)
 
-    success_count = 0
+    for _, row in metadata.iterrows():
+        image_id = row['id']
+        image_path = row['path']
 
-    # Initialize MediaPipe solutions (outside loop for better performance)
-    with mp_face_mesh.FaceMesh(
-            static_image_mode=True,
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5) as face_mesh:
+        #print(f"Processing image: {image_path}")
 
-        with mp_face_detection.FaceDetection(
-                model_selection=1,
-                min_detection_confidence=0.5) as face_detection:
+        # Trích xuất các đặc trưng
+        hog = extract_hog_features(image_path)
+        color_hist = extract_color_histogram(image_path)
+        landmark = extract_landmark_features(image_path)
+        # print(hog)
 
-            for _, row in metadata.iterrows():
-                image_id = row['id']
-                image_path = row['path']
 
-                print(f"Processing image: {image_path}")
-
-                # Extract MediaPipe face landmarks
-                landmarks = extract_mediapipe_face_landmarks(image_path)
-                if landmarks is not None:
-                    if store_features_in_db(image_id, 'mediapipe_landmarks', landmarks):
-                        success_count += 1
-
-                # Extract MediaPipe face detection features
-                face_detection_features = extract_mediapipe_face_detection(image_path)
-                if face_detection_features is not None:
-                    store_features_in_db(image_id, 'mediapipe_detection', face_detection_features)
-
-                # Extract facial attributes
-                facial_attributes = extract_facial_attributes(image_path)
-                if facial_attributes is not None:
-                    store_features_in_db(image_id, 'facial_attributes', facial_attributes)
-
-                # Extract HOG features
-                hog_features = extract_hog_features(image_path)
-                if hog_features is not None:
-                    store_features_in_db(image_id, 'hog', hog_features)
-
-    print(f"Successfully extracted and stored features for {success_count} images")
-
+        # Chỉ lưu nếu có hog (bắt buộc)
+        if hog is not None:
+            store_features_in_db(
+                image_id,
+                hog=hog,
+                color_hist=color_hist,
+                landmark=landmark
+            )
+        else:
+            print(f"Skipping image {image_path} because embedding is missing.")
 
 if __name__ == "__main__":
     processed_dir = "../data/processed_images"  # Đường dẫn tới thư mục chứa ảnh đã xử lý
     metadata_path = os.path.join(processed_dir, 'metadata.csv')
-    extract_and_store_features(processed_dir, metadata_path)
+    extract_and_store_features(metadata_path)

@@ -15,9 +15,9 @@ def create_database():
     conn.autocommit = True
     cursor = conn.cursor()
 
-    # Tạo database nếu chưa tồn tại
+    # Tạo database child_images_fn nếu chưa tồn tại
     try:
-        cursor.execute("CREATE DATABASE child_face_db")
+        cursor.execute("CREATE DATABASE child_images_fn")
         print("Database created successfully")
     except psycopg2.errors.DuplicateDatabase:
         print("Database already exists")
@@ -28,7 +28,7 @@ def create_database():
     # Kết nối đến database mới tạo
     conn = psycopg2.connect(
         host="localhost",
-        database="child_face_db",
+        database="child_images_fn",
         user="postgres",
         password="tranphuong"  # Thay bằng mật khẩu của bạn
     )
@@ -36,26 +36,27 @@ def create_database():
 
     # Tạo bảng images
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS images(
-        id SERIAL PRIMARY KEY,
-        file_name VARCHAR(255) NOT NULL UNIQUE,
-        age INTEGER,
-        gender VARCHAR(10),
-        ethnicity INTEGER,
-        path VARCHAR(255) NOT NULL,
-        upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        CREATE TABLE IF NOT EXISTS face_images(
+        id SERIAL PRIMARY KEY,           -- id tự động tăng
+        image_path TEXT NOT NULL,        -- Đường dẫn ảnh
+        age INT NOT NULL,                -- Tuổi
+        gender INT NOT NULL,             -- Giới tính (0: Nam, 1: Nữ)
+        race INT NOT NULL                -- Chủng tộc (ví dụ: 0: Châu Á, 1: Châu Âu, v.v.)
     )
     """)
 
-    # Tạo bảng features để lưu các vector đặc trưng
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS features(
-        id SERIAL PRIMARY KEY,
-        image_id INTEGER REFERENCES images(id) ON DELETE CASCADE,
-        feature_type VARCHAR(50) NOT NULL,
-        feature_vector BYTEA NOT NULL
+    CREATE TABLE IF NOT EXISTS image_features_1(
+        id SERIAL PRIMARY KEY,  -- id tự động tăng
+        image_id INT NOT NULL, -- Khóa ngoại liên kết với bảng face_images
+        hog FLOAT8[] NOT NULL, -- HOG (Histogram of Oriented Gradients) lưu dưới dạng JSON
+        color_hist FLOAT8[] NOT NULL, -- Màu sắc histogram lưu dưới dạng JSON
+        landmark FLOAT8[] NOT NULL, -- Dữ liệu landmark (điểm đặc trưng của khuôn mặt) lưu dưới dạng JSON
+        FOREIGN KEY(image_id) REFERENCES face_images(id) ON DELETE CASCADE
     )
     """)
+
+
     conn.commit()
 
     print("Tables created successfully")
